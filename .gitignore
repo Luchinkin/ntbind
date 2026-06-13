@@ -1,0 +1,25 @@
+# Cargo build outputs (root + per-crate / per-example targets).
+**/target/
+**/*.rs.bk
+
+# Generated SDK trees -- regenerated locally from PDBs via ntbindgen.
+# Listed explicitly (no `*sdk*` glob) so an unrelated future directory
+# like `sdk_archive/` is not silently ignored.
+/sdk/
+/cpp_sdk/
+/dual_sdk/
+
+# Locally cached / private working trees.
+/local/
+/symbols/
+
+# Editor / IDE droppings.
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS metadata.
+.DS_Store
+Thumbs.db

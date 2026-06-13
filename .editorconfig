@@ -1,0 +1,24 @@
+# Source of truth for indent / line endings in editors that don't read
+# `rustfmt.toml`.
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.{toml,yml,yaml}]
+indent_size = 2
+
+[*.md]
+trim_trailing_whitespace = false
+
+# C++ runtime headers (in `cpp/include/ntbind/`) descend from upstream
+# code that uses hard tabs; keep that style to minimize cross-tree
+# rebase noise.
+[*.{hpp,cpp,h,c}]
+indent_style = tab

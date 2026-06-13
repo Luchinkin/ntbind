@@ -1,0 +1,29 @@
+[package]
+name = "ntbind-patch"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Symbol-table patcher for ntbind-generated drivers; walks `.symtbl`, decrypts each entry, resolves against a target system, and rewrites in place."
+
+[[bin]]
+name = "ntbind-patch"
+path = "src/main.rs"
+
+[dependencies]
+ntbind = { path = "../ntbind" }
+pdb = "0.8"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+log = "0.4"
+env_logger = "0.11"
+rustc-hash = "2"
+
+# Loaded-driver enumeration on the running kernel.  Only pulled in on
+# Windows targets so CI Linux builds stay dep-free.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_ProcessStatus", "Win32_Foundation"] }
+
+[lints]
+workspace = true

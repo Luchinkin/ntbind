@@ -1,0 +1,13 @@
+# Normalize line endings: every text file checks out as LF regardless of
+# the host OS so `cargo fmt --check` stays stable across Windows / Linux
+# contributors and patches do not flip between LF and CRLF.
+* text=auto eol=lf
+
+# Build artifacts and binary inputs that must never be line-ending-normalized.
+*.pdb binary
+*.sys binary
+*.exe binary
+*.dll binary
+*.lib binary
+*.png binary
+*.ico binary

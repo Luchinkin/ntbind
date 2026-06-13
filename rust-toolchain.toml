@@ -1,0 +1,9 @@
+# Pin the toolchain so humans and CI agents build with the same compiler.
+#
+# Bump in lockstep with workspace `rust-version`.  Use `cargo +nightly
+# fmt` only -- the build itself stays on stable.
+
+[toolchain]
+channel = "1.95"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

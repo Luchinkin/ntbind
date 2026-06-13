@@ -1,0 +1,14 @@
+# The sample needs nightly so we can `-Z build-std` `core` only (no
+# precompiled `libstd` linked in) and `-Z json-target-spec` for the
+# custom kernel-mode target file -- the only way to produce a real
+# kernel driver on stable Rust today.  Workspace-level builds
+# (`crates/*`) stay on the stable channel pinned in
+# `../../rust-toolchain.toml`.
+#
+# Pinned to a specific nightly date; bump when new unstable features
+# are needed.  Nightlies are retained on rustup for ~6 months.
+
+[toolchain]
+channel = "nightly-2026-06-11"
+components = ["rust-src", "rustfmt", "clippy"]
+profile = "minimal"

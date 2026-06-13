@@ -1,0 +1,28 @@
+[package]
+name = "sample-driver"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Minimal Windows kernel-mode driver that consumes the generated ntbind."
+
+[lib]
+name = "sample_driver"
+# Building as `cdylib` on `x86_64-pc-windows-msvc` produces a PE image;
+# the target spec's `dll-suffix = ".sys"` plus `/SUBSYSTEM:NATIVE /DRIVER`
+# (from `.cargo/config.toml`) hand the I/O manager a loadable kernel
+# driver directly -- no rename needed.
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+ntbind = { path = "../../crates/ntbind" }
+ntbind-sys = { path = "../../sdk" }
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+strip = "symbols"
+
+[profile.dev]
+panic = "abort"

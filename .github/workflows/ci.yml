@@ -1,0 +1,61 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-test:
+    name: build + test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # `dtolnay/rust-toolchain` requires an explicit toolchain input;
+      # the version named here MUST track `rust-toolchain.toml`'s
+      # `channel` so CI and local builds use the same compiler.  The
+      # action itself is SHA-pinned to remove the supply-chain hop
+      # through its default branch.
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master @ 2026-06-12
+        with:
+          toolchain: "1.95"
+          components: clippy, rustfmt
+
+      - name: cargo-cache
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+
+      # Workspace build & test. The SDK + sample driver live OUTSIDE the
+      # workspace (`exclude` in `Cargo.toml`) because they depend on a
+      # PDB-generated tree we don't ship in CI. The E2E suite
+      # (`crates/ntbindgen/tests/determinism.rs`) is gated on `NTBINDGEN_E2E=1`
+      - name: cargo fmt --check (workspace)
+        run: cargo fmt --all --check
+
+      - name: cargo fmt --check (sample driver)
+        # `examples/sample-driver` is workspace-excluded; format it on its own.
+        working-directory: examples/sample-driver
+        run: cargo fmt --all --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo build (workspace)
+        run: cargo build --workspace --all-targets
+
+      - name: cargo test (workspace)
+        run: cargo test --workspace --all-targets

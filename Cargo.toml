@@ -1,0 +1,46 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/ntbind",
+    "crates/ntbindgen",
+    "crates/ntbind-patch",
+]
+exclude = [
+    "examples/sample-driver",
+    "sdk",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+publish = false
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+unreachable_pub = "warn"
+unused_lifetimes = "warn"
+
+[workspace.lints.clippy]
+correctness = { level = "deny", priority = -1 }
+perf = { level = "deny", priority = -1 }
+complexity = { level = "warn", priority = -1 }
+style = { level = "warn", priority = -1 }
+suspicious = { level = "warn", priority = -1 }
+
+# Warned locally; CI denies via `-D warnings`.
+dbg_macro = "warn"
+todo = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+# Force every `unsafe fn` to document its safety contract -- we have unsafe FFI everywhere.
+missing_safety_doc = "warn"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+[profile.dev]
+panic = "abort"

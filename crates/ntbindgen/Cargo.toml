@@ -1,0 +1,24 @@
+[package]
+name = "ntbindgen"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "ntbind generator -- turns Windows PDBs into a Rust SDK crate."
+
+[[bin]]
+name = "ntbindgen"
+path = "src/main.rs"
+
+[dependencies]
+pdb = "0.8"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+indexmap = "2"
+rustc-hash = "2"
+log = "0.4"
+env_logger = "0.11"
+
+[lints]
+workspace = true

@@ -1,0 +1,16 @@
+# Formatter source of truth.  Run `cargo fmt --all` before every commit;
+# CI fails on a `cargo fmt --all --check` mismatch.
+
+edition = "2024"
+newline_style = "Unix"
+max_width = 100
+use_small_heuristics = "Max"
+use_field_init_shorthand = true
+use_try_shorthand = true
+match_block_trailing_comma = true
+
+# The import-grouping convention (std / external / crate, blank line
+# between groups) is documented in `ai_guidelines/rust/rust_guidelines.md`
+# section 4 and held by hand -- the rustfmt options that would enforce
+# it (`group_imports`, `imports_granularity`) are nightly-only and would
+# spam CI output with warnings on every stable run.
