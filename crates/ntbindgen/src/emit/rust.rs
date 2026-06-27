@@ -624,11 +624,40 @@ fn is_value_copyable(t: &TypeRef) -> bool {
         t,
         TypeRef::Primitive(p) if matches!(
             *p,
-            "u8" | "u16" | "u32" | "u64" | "u128"
+            "u8" | "u16" | "u32" | "u64" | "u128" | "wchar" | "char"
                 | "i8" | "i16" | "i32" | "i64" | "i128"
                 | "f32" | "f64" | "usize" | "isize"
         )
     )
+}
+
+// Render an enum variant value as a Rust integer literal whose type
+// matches the enum's `underlying`. Bit patterns whose MSB is set in a
+// signed underlying come from the IR as the unsigned form; rewrite
+// them to the two's-complement signed form so both `= EXPR,`
+// discriminants and `EXPR => ...` match arms accept them.
+fn fmt_enum_value_rust(value: i128, underlying: &TypeRef) -> String {
+    let (bits, signed): (u32, bool) = match underlying {
+        TypeRef::Primitive(p) => match *p {
+            "i8" => (8, true),
+            "i16" => (16, true),
+            "i32" => (32, true),
+            "i64" => (64, true),
+            "u8" => (8, false),
+            "u16" => (16, false),
+            "u32" => (32, false),
+            "u64" => (64, false),
+            _ => (32, true),
+        },
+        _ => (32, true),
+    };
+    if signed {
+        let signed_max: i128 = (1i128 << (bits - 1)) - 1;
+        if value > signed_max {
+            return (value - (1i128 << bits)).to_string();
+        }
+    }
+    value.to_string()
 }
 
 fn render_enum(e: &EnumDecl) -> String {
@@ -650,7 +679,8 @@ fn render_enum(e: &EnumDecl) -> String {
         let var_name = upper_camel_case(&v.rust_name);
         if seen_values.insert(v.value) {
             let _ = writeln!(out, "    /// `{}` = 0x{:x}", v.original_name, v.value);
-            let _ = writeln!(out, "    {var_name} = {} as _,", v.value);
+            let _ =
+                writeln!(out, "    {var_name} = {},", fmt_enum_value_rust(v.value, &e.underlying));
         } else {
             aliases.push((var_name, &v.original_name, v.value));
         }
@@ -701,7 +731,7 @@ fn render_enum(e: &EnumDecl) -> String {
         let _ = writeln!(
             out,
             "            {value} => ::core::result::Result::Ok(Self::{var_name}),",
-            value = v.value,
+            value = fmt_enum_value_rust(v.value, &e.underlying),
         );
     }
     let _ = writeln!(
@@ -717,7 +747,18 @@ fn render_enum(e: &EnumDecl) -> String {
 fn render_type_ref(t: &TypeRef) -> String {
     match t {
         TypeRef::Pointer => "*mut ::core::ffi::c_void".to_owned(),
-        TypeRef::Primitive(p) => (*p).to_owned(),
+        TypeRef::Primitive(p) => {
+            // Rust has no `wchar_t` / platform-distinct `char` -- collapse
+            // `wchar` to `u16` and `char` to `i8` so the rest of the emit
+            // (Copy companions, struct field bodies) treats them uniformly
+            // with their PDB-equivalent integer kinds.
+            let s = match *p {
+                "wchar" => "u16",
+                "char" => "i8",
+                other => other,
+            };
+            s.to_owned()
+        },
         TypeRef::TypedPointer { path, .. } => {
             let camel = upper_camel_case(&path.name);
             format!("*mut crate::{ns}::{camel}", ns = path.ns)
@@ -730,12 +771,14 @@ fn render_type_ref(t: &TypeRef) -> String {
         TypeRef::Opaque(s) => format!("[u8; 0x{:x}]", s.max(&1)),
         TypeRef::External { rust_path, .. } => (*rust_path).to_owned(),
         // Pointer to a non-user-defined pointee -- recurse and prefix
-        // `*mut`.  Closes the primitive-pointer / pointer-to-pointer
-        // fidelity gap vs Selene.
+        // `*mut`.
         TypeRef::Ref(inner) => format!("*mut {}", render_type_ref(inner)),
         // Pointer to a function -- Rust fn pointers are already
         // pointer-sized values at the language level; no outer `*mut`.
         TypeRef::FnPtr(sig) => render_fn_ptr_rust(sig),
+        // Rust has no language-level `volatile` -- preserved only on the
+        // C++ side. Wire format is unaffected. Delegate.
+        TypeRef::Volatile(inner) => render_type_ref(inner),
     }
 }
 

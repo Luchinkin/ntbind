@@ -52,9 +52,14 @@ pub fn write_unit(
 // Crate-/tree-level finalization (lib.rs + Cargo.toml for Rust; nothing
 // for C++ since each `.hpp` is standalone). Run once after every namespace
 // has been written.
-pub fn finalize(out_root: &Path, namespaces: &[MergedNamespace], target: Target) -> Result<()> {
+pub fn finalize(
+    out_root: &Path,
+    namespaces: &[MergedNamespace],
+    opts: EmitOptions,
+    target: Target,
+) -> Result<()> {
     match target {
         Target::Rust => rust::finalize_crate(out_root, namespaces),
-        Target::Cpp => cpp::finalize_tree(out_root, namespaces),
+        Target::Cpp => cpp::finalize_tree(out_root, namespaces, opts),
     }
 }

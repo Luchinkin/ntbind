@@ -149,6 +149,13 @@ fn main() -> Result<()> {
     let after = merged.iter().map(|n| n.types.len()).sum::<usize>();
     log::info!("orphan-pointee stubs injected: {}", after - before);
 
+    // Cross-bucket type dedup -- see `merge::dedup_across_namespaces` for
+    // the rationale and tiebreaker rules.
+    let before_dedup = merged.iter().map(|n| n.types.len()).sum::<usize>();
+    merged = merge::dedup_across_namespaces(merged, config::PDB_ENTRIES);
+    let after_dedup = merged.iter().map(|n| n.types.len()).sum::<usize>();
+    log::info!("cross-bucket type duplicates dropped: {}", before_dedup - after_dedup);
+
     if opts.no_encrypt {
         // Plaintext mode -- zero every entry key so the generated
         // macros baseline the cipher to a no-op (and the patcher
@@ -196,6 +203,6 @@ fn emit_for(
         emit::write_unit(ns, root, opts, *target)
             .with_context(|| format!("emitting {} ({:?})", ns.default_ns, target))?;
     }
-    emit::finalize(root, namespaces, *target).context("finalizing target tree")?;
+    emit::finalize(root, namespaces, opts, *target).context("finalizing target tree")?;
     Ok(())
 }

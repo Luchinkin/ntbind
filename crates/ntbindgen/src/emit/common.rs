@@ -132,7 +132,7 @@ fn walk_orphans(
     out: &mut BTreeMap<(String, String), PointeeKind>,
 ) {
     match t {
-        TypeRef::TypedPointer { path, kind } => {
+        TypeRef::TypedPointer { path, kind, .. } => {
             let key = (path.ns.clone(), path.name.clone());
             if !emitted.contains(&key) {
                 out.entry(key).or_insert(*kind);
@@ -143,7 +143,7 @@ fn walk_orphans(
         // lowering pipeline.  Recurse so an orphan pointee that only
         // appears inside a nested fn-pointer argument still gets its
         // stub injected.
-        TypeRef::Ref(inner) => walk_orphans(inner, emitted, out),
+        TypeRef::Ref(inner) | TypeRef::Volatile(inner) => walk_orphans(inner, emitted, out),
         TypeRef::FnPtr(sig) => {
             walk_orphans(&sig.return_type, emitted, out);
             for p in &sig.params {

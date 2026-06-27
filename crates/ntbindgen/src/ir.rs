@@ -104,13 +104,16 @@ pub struct EnumVariant {
     pub original_name: String,
     pub rust_name: String,
     pub value: i128,
+    // Build label that contributed this variant when cross-build merging
+    // is added. `None` defaults to the canonical build's friendly label.
+    pub build_tag: Option<&'static str>,
 }
 
 // One exported / addressable symbol.
 //
 // `signature` is filled when the PDB's IPI stream carried an
 // `LF_FUNC_ID` for this name pointing at an `LF_PROCEDURE` we managed
-// to lower; that's the case Selene-style typed call-sites unlock.
+// to lower; that's the case typed call-sites unlock.
 // When the IPI didn't carry function-type info (most data exports,
 // some compiler-generated thunks) it stays `None` and the emitter
 // falls back to the legacy untyped `Public<c_void>` / `sdk::unknown_ptr`
@@ -164,6 +167,9 @@ pub enum TypeRef {
     TypedPointer {
         path: RustPath,
         kind: PointeeKind,
+        // Preserves CodeView `LF_POINTER` attribute bit 9 (`isvolatile`)
+        // onto the pointee, rendered C++-side as `<type> volatile*`.
+        volatile_pointee: bool,
     },
     // Resolves to a generated type by its `RustPath`.
     UserDefined(RustPath),
@@ -186,16 +192,20 @@ pub enum TypeRef {
     },
     // Anything we can't model -- emitted as `[u8; SIZE]`.
     Opaque(u64),
-    // Pointer to a non-user-defined pointee.  Closes the Selene-parity
-    // gap where primitive pointees (`wchar_t*`, `uint32_t*`), pointer-
-    // to-pointer (`void**`), and any other non-Class/Union/Enum target
-    // used to collapse to an untyped `*mut c_void`.  Pointers to user-
-    // defined types still use [`TypeRef::TypedPointer`] so the orphan-
-    // stub injector keeps its `PointeeKind` hint without an extra lookup.
+    // Pointer to a non-user-defined pointee (primitive, pointer-to-pointer,
+    // etc.). Pointers to user-defined types still use
+    // [`TypeRef::TypedPointer`] so the orphan-stub injector keeps its
+    // `PointeeKind` hint without an extra lookup.
     Ref(Box<TypeRef>),
     // Function-pointer type recovered from `LF_POINTER -> LF_PROCEDURE`.
     // Renders as `unsafe extern "system" fn(...) -> ret` (Rust) and
     // `sdk::function<R(args...)>*` (C++) -- the C++ form bakes the
     // pointer in, the Rust form doesn't need an outer `*mut`.
     FnPtr(Box<FnSig>),
+    // `volatile T` qualifier preserved from PDB `LF_MODIFIER`. Orthogonal
+    // to `Ref`/`TypedPointer`: `volatile T*` lowers as `Ref(Volatile(T))`,
+    // while a by-value `volatile T` field lowers as `Volatile(T)`. Rust
+    // has no language-level volatile, so the Rust emitter delegates to the
+    // inner type.
+    Volatile(Box<TypeRef>),
 }

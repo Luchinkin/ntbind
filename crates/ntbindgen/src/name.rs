@@ -8,7 +8,7 @@ use std::fmt;
 use crate::config::NAMESPACE_PREFIXES;
 
 // Where a generated item lives in the SDK crate.
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct RustPath {
     // `::`-separated module path, e.g. `"ki"` or `"dxgk::arg"`.
     pub ns: String,
@@ -22,6 +22,36 @@ impl fmt::Display for RustPath {
     }
 }
 
+// Standalone kernel-global types shared across many PDBs without a
+// distinguishing prefix.  Without this fast-path the prefix loop fails
+// to match a 3-letter name like `MDL` and the caller routes `_MDL`
+// into per-PDB namespaces (`ndis::mdl_t`, `wdf::mdl_t`, ...), one copy
+// per load.
+//
+// `_UNICODE_STRING`, `_STRING`, `_LIST_ENTRY`, `_LARGE_INTEGER` and
+// friends are handled earlier by `pdb_io::substitute_native_type`;
+// only list TYPES here that the runtime builtins do NOT cover.
+const KERNEL_GLOBAL_TYPES: &[&str] = &[
+    "mdl",
+    "luid",
+    "luid_and_attributes",
+    "object_attributes",
+    "client_id",
+    // `_GUID` appears in many PDBs (ntkrnlmp, combase, wdf, ...).
+    // Force it into `nt::` so cross-bucket dedup collapses all
+    // definitions to a single `nt::guid_t`.
+    "guid",
+    // `_DEVICE_POWER_STATE` is the kernel-canonical enum but ndis.pdb
+    // also defines its own copy; force `nt::` so ndis-side fields
+    // share the canonical type.
+    "device_power_state",
+];
+
+// User-mode globals routed into the `win::` namespace.  `_PEB` is
+// pinned here so it stays out of `nt::` and won't collide with
+// downstream `nt::peb_t` aliases.
+const USER_GLOBAL_TYPES: &[&str] = &["peb"];
+
 // Applies the namespace transform to `pdb_name`. Returns `None` if the
 // name doesn't match any prefix recipe -- callers fall back to
 // `default_ns + snake_case(pdb_name) + "_t"`.
@@ -30,6 +60,13 @@ pub fn classify(pdb_name: &str) -> Option<RustPath> {
     // PDB tag names start with `_` (e.g. `_KI_FOO`). Strip it for matching.
     let stripped = pdb_name.strip_prefix('_').unwrap_or(pdb_name);
     let lower = stripped.to_ascii_lowercase();
+
+    if KERNEL_GLOBAL_TYPES.contains(&lower.as_str()) {
+        return Some(RustPath { ns: "nt".to_owned(), name: format!("{lower}_t") });
+    }
+    if USER_GLOBAL_TYPES.contains(&lower.as_str()) {
+        return Some(RustPath { ns: "win".to_owned(), name: format!("{lower}_t") });
+    }
 
     for (prefix, ns) in NAMESPACE_PREFIXES {
         if !lower.starts_with(prefix) {
@@ -62,6 +99,41 @@ pub fn classify(pdb_name: &str) -> Option<RustPath> {
         return Some(RustPath { ns, name: format!("{body}_t") });
     }
 
+    None
+}
+
+// Publics-side analogue of `classify()`: input is already snake_case +
+// lowercased; returns `(ns, body)` with no `_t` suffix.  `None` when
+// no prefix matches.  Used by the emit path to split per-PDB publics
+// into per-namespace `api.hpp` files.
+#[must_use]
+pub fn classify_for_public(snake_name: &str) -> Option<(String, String)> {
+    for (prefix, ns) in NAMESPACE_PREFIXES {
+        if !snake_name.starts_with(prefix) {
+            continue;
+        }
+        if snake_name.len() <= prefix.len() + 1 {
+            continue;
+        }
+        let rest = &snake_name[prefix.len()..];
+        let (sub_ns, body) = match strip_sub_prefix(rest) {
+            Some(t) => t,
+            None => continue,
+        };
+
+        let mut body = body.to_owned();
+        if KEYWORDS.contains(&body.as_str()) {
+            body.push('_');
+        }
+        if body.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+            body.insert(0, '_');
+        }
+        let mut ns = if sub_ns.is_empty() { (*ns).to_owned() } else { format!("{ns}::{sub_ns}") };
+        if ns == "exp" || ns.starts_with("exp::") {
+            ns.insert(3, 'i');
+        }
+        return Some((ns, body));
+    }
     None
 }
 

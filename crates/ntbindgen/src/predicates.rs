@@ -119,7 +119,10 @@ pub fn is_midl_frag(name: &str) -> bool {
 // Acceptance criteria for publics:
 // 1. `is_valid_c_name(name)` -- the plain identifier path.
 // 2. `??0` / `??1` (ctor/dtor) mangling where the bare class name is C-valid.
-// 3. `@`-separated `Class@@Member` paths whose components are each
+// 3. `?NAME@@SIG` -- single-`?` mangled function/data form: qualified
+//    name lives before the first `@@`; the signature past it is
+//    irrelevant to acceptance.
+// 4. `@`-separated `Class@@Member` paths whose components are each
 //    valid C names of length > 1.
 //
 // We emit the public after demangling via `demangle_simple_cxx` so the
@@ -133,6 +136,14 @@ pub fn is_acceptable_public_name(name: &str) -> bool {
         // `??0Foo@@...`: take up to the first `@`.
         let bare = rest.split('@').next().unwrap_or("");
         return is_valid_c_name(bare);
+    }
+    // `?NAME@@SIG` -- qualified name ahead of `@@`, signature after.
+    if let Some(rest) = name.strip_prefix('?')
+        && !rest.starts_with('?')
+        && let Some((qname, _sig)) = rest.split_once("@@")
+    {
+        let parts: Vec<&str> = qname.split('@').filter(|s| !s.is_empty()).collect();
+        return !parts.is_empty() && parts.iter().all(|s| is_valid_c_name(s));
     }
     if name.contains('@') && !name.contains("__") {
         return name
@@ -158,13 +169,21 @@ pub fn is_valid_c_name(name: &str) -> bool {
 }
 
 // Reduces a C++ public name to a plain identifier we can shove into Rust:
-// - `??0Class@@QEAA...` -> `Class`
-// - `??1Class@@QEAA...` -> `Class_dtor`
-// - `Class@@Member@@...` -> `Class_Member`
-// - Plain C names pass through untouched.
 //
-// Simple demangler that only needs a name that snake-cases cleanly and
-// stays unique within its symbol set.
+//   `??0Class@@QEAA...`                         -> `Class`
+//   `??1Class@@QEAA...`                         -> `Class_dtor`
+//   `?ndisDereferenceFilter@@YAX...`            -> `ndisDereferenceFilter`
+//   `?ndisIfList@@3U_LIST_ENTRY@@A`             -> `ndisIfList`
+//   `?Foo@Bar@@QEAAXXZ`                         -> `Bar_Foo`  (scoped name)
+//   `??_C@_0...`                                -> falls through
+//   `Class@@Member@@...`                        -> `Class_Member`
+//   Plain C names pass through untouched.
+//
+// MSVC encodes the qualified name as a reversed `@`-separated list
+// terminated by `@@`; everything past the first `@@` is the signature
+// (calling convention, parameter types, return type) and must not leak
+// into the demangled identifier.
+//
 #[must_use]
 pub fn demangle_simple_cxx(name: &str) -> String {
     if let Some(rest) = name.strip_prefix("??0") {
@@ -175,6 +194,29 @@ pub fn demangle_simple_cxx(name: &str) -> String {
         let bare = rest.split('@').next().unwrap_or("");
         return format!("{bare}_dtor");
     }
+    // `?NAME@@SIG` -- strip the leading `?` and cut at the first `@@`.
+    // What remains is the qualified name; reversed scope list, joined
+    // with `_`.  E.g. `Foo@Bar@@` -> ["Foo", "Bar"] -> "Bar_Foo".
+    if let Some(rest) = name.strip_prefix('?')
+        && !rest.starts_with('?')
+        && let Some((qname, _sig)) = rest.split_once("@@")
+    {
+        let parts: Vec<&str> = qname.split('@').filter(|s| !s.is_empty()).collect();
+        if !parts.is_empty() && parts.iter().all(|s| is_valid_c_name(s)) {
+            // MSVC encodes scope innermost-first; reverse so output reads
+            // `Outer_Inner`.
+            let mut joined = String::new();
+            for (i, p) in parts.iter().rev().enumerate() {
+                if i != 0 {
+                    joined.push('_');
+                }
+                joined.push_str(p);
+            }
+            return joined;
+        }
+    }
+    // Unmangled C++-ish `Class@@Member@@...` (no leading `?`).  Keep the
+    // legacy behavior so existing acceptable identifiers don't regress.
     if name.contains('@') && !name.contains("__") {
         let parts: Vec<&str> = name
             .split('@')

@@ -41,12 +41,32 @@ pub fn load_unit(entry: &PdbEntry, pdb_path: &Path) -> Result<Unit> {
         type_finder.update(&iter);
     }
 
-    let mut ctx = Lowering {
-        finder: &type_finder,
-        entry,
-        seen: rustc_hash::FxHashSet::default(),
-        extras: Vec::new(),
-    };
+    // Pre-build a name -> tidx map of non-forward Class/Union records
+    // with a real field list. BaseClass records often point at a
+    // forward-ref decl, so resolution falls back to this map.
+    let mut class_by_name: rustc_hash::FxHashMap<String, TypeIndex> =
+        rustc_hash::FxHashMap::default();
+    {
+        let mut scan_iter = type_info.iter();
+        while let Some(item) = scan_iter.next()? {
+            let Ok(data) = item.parse() else { continue };
+            let (name, has_fields) = match &data {
+                TypeData::Class(c) if !c.properties.forward_reference() && c.fields.is_some() => {
+                    (c.name.to_string().into_owned(), true)
+                },
+                TypeData::Union(u) if !u.properties.forward_reference() => {
+                    (u.name.to_string().into_owned(), true)
+                },
+                _ => continue,
+            };
+            if has_fields {
+                // First-seen instance per name is sufficient for BaseClass resolution.
+                class_by_name.entry(name).or_insert(item.index());
+            }
+        }
+    }
+
+    let mut ctx = Lowering { finder: &type_finder, entry, extras: Vec::new(), class_by_name };
 
     let mut types = Vec::new();
     let mut iter = type_info.iter();
@@ -62,15 +82,58 @@ pub fn load_unit(entry: &PdbEntry, pdb_path: &Path) -> Result<Unit> {
     // Drain anon types collected during field lowering. They look just like
     // any other generated type to the emitter.
     types.extend(ctx.extras);
-    // IPI -- the Item Index stream pairs an `LF_FUNC_ID` (name) with the
-    // TPI `LF_PROCEDURE` (signature) that gave us the function's prototype.
-    // We build a `name -> tpi_type_index` map here so the publics ingestion
-    // loop can attach signatures by lookup -- matching what Selene's
-    // sdkgen does via its `public_map[name].types` field.
-    //
-    // Failing to read the IPI stream is non-fatal: ntbindgen still emits
-    // an untyped public for every entry, exactly as it did before this
-    // feature.
+
+    // De-duplicate types by name: PDB TPI commonly carries multiple
+    // non-forward Class/Union records for the same struct (partial
+    // public-facing decl vs fuller private decl, with either differing
+    // or matching sizes). Tiebreak by (field count, size) descending
+    // -- pick the most complete instance; first-seen wins on equal
+    // rank. Anon synthetic names are unique by construction.
+    {
+        use rustc_hash::FxHashMap;
+        let rank = |t: &TypeDecl| -> (usize, u64) {
+            match t {
+                TypeDecl::Struct(s) | TypeDecl::Union(s) => (s.fields.len(), s.size),
+                TypeDecl::Enum(e) => (e.variants.len(), 0),
+                TypeDecl::Stub(_) => (0, 0),
+            }
+        };
+        let type_name = |t: &TypeDecl| -> String {
+            match t {
+                TypeDecl::Struct(s) | TypeDecl::Union(s) => s.original_name.clone(),
+                TypeDecl::Enum(e) => e.original_name.clone(),
+                TypeDecl::Stub(s) => s.original_name.clone(),
+            }
+        };
+        let mut by_name: FxHashMap<String, (usize, (usize, u64))> = FxHashMap::default();
+        let mut keep = vec![true; types.len()];
+        for (i, t) in types.iter().enumerate() {
+            let name = type_name(t);
+            let r = rank(t);
+            match by_name.get(&name) {
+                Some(&(_, prev_r)) if prev_r >= r => {
+                    keep[i] = false;
+                },
+                Some(&(prev_i, _)) => {
+                    keep[prev_i] = false;
+                    by_name.insert(name, (i, r));
+                },
+                None => {
+                    by_name.insert(name, (i, r));
+                },
+            }
+        }
+        let mut i = 0usize;
+        types.retain(|_| {
+            let k = keep[i];
+            i += 1;
+            k
+        });
+    }
+    // IPI -- pair `LF_FUNC_ID` (name) with the TPI `LF_PROCEDURE`
+    // (signature). Build a name -> tpi_type_index map so the publics
+    // ingestion loop can attach signatures by lookup. Missing IPI is
+    // non-fatal: untyped publics are emitted instead.
     let signatures_by_name: rustc_hash::FxHashMap<String, TypeIndex> = match pdb.id_information() {
         Ok(id_info) => collect_function_ids(&id_info)?,
         Err(e) => {
@@ -112,8 +175,7 @@ pub fn load_unit(entry: &PdbEntry, pdb_path: &Path) -> Result<Unit> {
         let key = name::sdbm_hash(&ident);
         // IPI keys functions on the demangled bare name (`bar`, `Foo`);
         // S_PUB32 carries the mangled symbol (`?bar@Foo@@QEAA...`).
-        // Match Selene's `demangle_simple` and look up using the same
-        // shape both streams produce.
+        // Demangle the public so both streams agree on the lookup key.
         let ipi_key = predicates::demangle_simple_cxx(&original);
         let signature = signatures_by_name
             .get(&ipi_key)
@@ -144,7 +206,7 @@ fn sanitize_public_name(orig: &str) -> String {
 
 // Walks the IPI stream and collects every `LF_FUNC_ID` record into a
 // `name -> TypeIndex` map -- the TypeIndex points at the function's
-// `LF_PROCEDURE` in TPI.  Selene's `pdblib` does the same in C++.
+// `LF_PROCEDURE` in TPI.
 fn collect_function_ids(
     id_info: &pdb::IdInformation<'_>,
 ) -> Result<rustc_hash::FxHashMap<String, TypeIndex>> {
@@ -228,43 +290,38 @@ fn is_no_type_index(idx: TypeIndex, finder: &ItemFinder<'_, TypeIndex>) -> bool 
     matches!(item.parse(), Ok(TypeData::Primitive(p)) if p.kind == PrimitiveKind::NoType)
 }
 
-fn merge_nt_zw_publics(publics: &mut Vec<PublicDecl>) {
-    // Nt/Zw publics are merged: treat them as the same public, keep the
-    // Nt flavour as canonical, drop Zw.
-    // We use the suffix (everything after the 2-char prefix) as the key.
+fn merge_nt_zw_publics(publics: &mut [PublicDecl]) {
+    // Keep both `Nt*` and `Zw*` publics. Cross-copy `LF_FUNC_ID`
+    // signatures so callers on either side see typed parameters even
+    // when the PDB only carried an IPI record for one half of the pair.
     use rustc_hash::FxHashMap;
     let mut nt_index: FxHashMap<String, usize> = FxHashMap::default();
+    let mut zw_index: FxHashMap<String, usize> = FxHashMap::default();
     for (i, p) in publics.iter().enumerate() {
         if let Some(suffix) = p.original_name.strip_prefix("Nt") {
             nt_index.insert(suffix.to_owned(), i);
+        } else if let Some(suffix) = p.original_name.strip_prefix("Zw") {
+            zw_index.insert(suffix.to_owned(), i);
         }
     }
-    // Before dropping a Zw entry, if its Nt counterpart has no
-    // signature and Zw does, copy Zw's signature onto Nt.  PDBs in the
-    // wild sometimes carry the `LF_FUNC_ID` against only one half of
-    // the pair; Selene merges them via `is_decl_identical`-based dedup,
-    // we approximate the useful subset (signature inheritance) here.
-    let mut zw_sigs: FxHashMap<usize, FnSig> = FxHashMap::default();
-    for p in publics.iter() {
-        let Some(suffix) = p.original_name.strip_prefix("Zw") else { continue };
-        let Some(&nt_i) = nt_index.get(suffix) else { continue };
-        if publics[nt_i].signature.is_none()
-            && let Some(sig) = &p.signature
-        {
-            zw_sigs.insert(nt_i, sig.clone());
+    let mut updates: Vec<(usize, FnSig)> = Vec::new();
+    for (suffix, &nt_i) in &nt_index {
+        if let Some(&zw_i) = zw_index.get(suffix) {
+            if publics[nt_i].signature.is_none()
+                && let Some(sig) = &publics[zw_i].signature
+            {
+                updates.push((nt_i, sig.clone()));
+            }
+            if publics[zw_i].signature.is_none()
+                && let Some(sig) = &publics[nt_i].signature
+            {
+                updates.push((zw_i, sig.clone()));
+            }
         }
     }
-    for (nt_i, sig) in zw_sigs {
-        publics[nt_i].signature = Some(sig);
+    for (i, sig) in updates {
+        publics[i].signature = Some(sig);
     }
-    publics.retain(|p| {
-        if let Some(suffix) = p.original_name.strip_prefix("Zw") {
-            // Drop only when a matching Nt entry exists.
-            !nt_index.contains_key(suffix)
-        } else {
-            true
-        }
-    });
 }
 
 // Lowering context -- what every lower-* function needs.
@@ -272,9 +329,12 @@ fn merge_nt_zw_publics(publics: &mut Vec<PublicDecl>) {
 struct Lowering<'a> {
     finder: &'a ItemFinder<'a, TypeIndex>,
     entry: &'a PdbEntry,
-    seen: rustc_hash::FxHashSet<String>,
     // Anonymous types harvested from inside other types' field lists.
     extras: Vec<TypeDecl>,
+    // Name -> TypeIndex for non-forward Class/Union records with a real
+    // FieldList. BaseClass records often reference the forward-ref
+    // decl, so resolution falls back to a name lookup.
+    class_by_name: rustc_hash::FxHashMap<String, TypeIndex>,
 }
 
 impl<'a> Lowering<'a> {
@@ -305,9 +365,8 @@ impl<'a> Lowering<'a> {
         {
             return None;
         }
-        if !self.seen.insert(original.to_owned()) {
-            return None;
-        }
+        // Dedup is deferred to load_unit so the post-pass can pick the
+        // most complete instance of multiple Class records with the same name.
         let path = self.classify_or_fallback(original);
         let fields = self.lower_fields(c.fields, original, &path).unwrap_or_default();
         let summary_key = name::sdbm_hash(&format!("{original}.$"));
@@ -339,9 +398,7 @@ impl<'a> Lowering<'a> {
         {
             return None;
         }
-        if !self.seen.insert(original.to_owned()) {
-            return None;
-        }
+        // Dedup deferred to load_unit; same rationale as lower_class.
         let path = self.classify_or_fallback(original);
         let fields = self.lower_fields(Some(u.fields), original, &path).unwrap_or_default();
         let summary_key = name::sdbm_hash(&format!("{original}.$"));
@@ -367,26 +424,27 @@ impl<'a> Lowering<'a> {
         {
             return None;
         }
-        if !self.seen.insert(original.to_owned()) {
-            return None;
-        }
+        // Dedup deferred to load_unit; same rationale as lower_class.
         let path = self.classify_or_fallback(original);
         let underlying = resolve_type(e.underlying_type, self.finder, self.entry.ns_tag)
             .unwrap_or(TypeRef::Primitive("i32"));
 
-        let mut raw: Vec<(String, i128)> = Vec::new();
+        // Per-variant tuple: (original_name, value, build_tag). build_tag
+        // is set by the cross-build merge in merge.rs on variants from a
+        // non-canonical build so the emitter can annotate them.
+        let mut raw: Vec<(String, i128, Option<&'static str>)> = Vec::new();
         if let Ok(field_list) = self.finder.find(e.fields)
             && let Ok(TypeData::FieldList(fl)) = field_list.parse()
         {
             collect_enum_raw(&fl, self.finder, &mut raw);
         }
         let prefix_len = {
-            let names: Vec<&str> = raw.iter().map(|(n, _)| n.as_str()).collect();
+            let names: Vec<&str> = raw.iter().map(|(n, _, _)| n.as_str()).collect();
             name::common_variant_prefix_len(&names)
         };
         let mut variants = Vec::with_capacity(raw.len());
         let mut used = rustc_hash::FxHashSet::default();
-        for (original_v, value) in raw {
+        for (original_v, value, build_tag) in raw {
             let trimmed = &original_v[prefix_len..];
             let mut rust_name = name::to_snake_case(trimmed);
             if rust_name.is_empty() {
@@ -402,7 +460,7 @@ impl<'a> Lowering<'a> {
             while !used.insert(rust_name.clone()) {
                 rust_name.push('_');
             }
-            variants.push(EnumVariant { original_name: original_v, rust_name, value });
+            variants.push(EnumVariant { original_name: original_v, rust_name, value, build_tag });
         }
         Some(TypeDecl::Enum(EnumDecl {
             original_name: original.to_owned(),
@@ -447,19 +505,154 @@ impl<'a> Lowering<'a> {
         out: &mut Vec<FieldDecl>,
         used: &mut rustc_hash::FxHashSet<String>,
     ) {
+        self.collect_fields_with_base(fl, parent_original, parent_path, 0, anon_counter, out, used);
+    }
+
+    // Flatten legacy anon-union members (`u`/`u0..u9`/`s`/`s0..s9`/
+    // `e`/`e0..e9`) into the parent struct, adjusting field offsets by
+    // the outer base. Lets consumers reach `section->file_object`
+    // instead of `section->u1.file_object`.
+    #[allow(clippy::too_many_arguments)]
+    fn collect_fields_with_base(
+        &mut self,
+        fl: &FieldList<'_>,
+        parent_original: &str,
+        parent_path: &RustPath,
+        base_bit_offset: u32,
+        anon_counter: &mut u32,
+        out: &mut Vec<FieldDecl>,
+        used: &mut rustc_hash::FxHashSet<String>,
+    ) {
         for field in &fl.fields {
-            if let TypeData::Member(m) = field
-                && let Some(decl) =
+            // Flatten base classes (LF_BCLASS): splice the base's
+            // fields into the derived struct's list, shifting each
+            // field's offset by the BaseClass record's `offset`
+            // (typically 0 for single-base kernel records).
+            if let TypeData::BaseClass(b) = field {
+                // PDB BaseClass records often reference the forward-ref
+                // decl; fall back through `class_by_name` if so.
+                if let Some(base_fl_idx) = self.resolve_base_fields_idx(b.base_class)
+                    && let Ok(base_fl_item) = self.finder.find(base_fl_idx)
+                    && let Ok(TypeData::FieldList(base_fl)) = base_fl_item.parse()
+                {
+                    let nested_base = base_bit_offset.saturating_add(b.offset.saturating_mul(8));
+                    self.collect_fields_with_base(
+                        &base_fl,
+                        parent_original,
+                        parent_path,
+                        nested_base,
+                        anon_counter,
+                        out,
+                        used,
+                    );
+                }
+                continue;
+            }
+            if let TypeData::Member(m) = field {
+                // Flatten path: legacy anon name + anon-typed Class/Union.
+                if let Some(inner_fields_idx) = self.detect_anon_flatten_target(m)
+                    && let Ok(inner_item) = self.finder.find(inner_fields_idx)
+                    && let Ok(TypeData::FieldList(inner_fl)) = inner_item.parse()
+                {
+                    let inner_base = base_bit_offset
+                        .saturating_add(u32::try_from(m.offset * 8).unwrap_or(u32::MAX));
+                    self.collect_fields_with_base(
+                        &inner_fl,
+                        parent_original,
+                        parent_path,
+                        inner_base,
+                        anon_counter,
+                        out,
+                        used,
+                    );
+                    continue;
+                }
+                // Normal path: lower the member, then rebase its
+                // bit_offset by the accumulated base for flatten contexts.
+                if let Some(mut decl) =
                     self.lower_member(m, parent_original, parent_path, anon_counter, used)
-            {
-                out.push(decl);
+                {
+                    if base_bit_offset != 0 {
+                        decl.bit_offset = decl.bit_offset.saturating_add(base_bit_offset);
+                    }
+                    out.push(decl);
+                }
             }
         }
         if let Some(cont) = fl.continuation
             && let Ok(item) = self.finder.find(cont)
             && let Ok(TypeData::FieldList(next)) = item.parse()
         {
-            self.collect_fields(&next, parent_original, parent_path, anon_counter, out, used);
+            self.collect_fields_with_base(
+                &next,
+                parent_original,
+                parent_path,
+                base_bit_offset,
+                anon_counter,
+                out,
+                used,
+            );
+        }
+    }
+
+    // Returns the inner FieldList's TypeIndex when `m` is a flatten
+    // candidate (legacy-anon name AND anonymous Class/Union type with
+    // a non-forward-ref body). Pure predicate; caller splices.
+    fn detect_anon_flatten_target(&self, m: &MemberType<'_>) -> Option<TypeIndex> {
+        let name = m.name.to_string();
+        if !predicates::is_legacy_anonymous_variable(name.as_ref()) {
+            return None;
+        }
+        let item = self.finder.find(m.field_type).ok()?;
+        let data = item.parse().ok()?;
+        match data {
+            TypeData::Class(c) if !c.properties.forward_reference() => {
+                let n = c.name.to_string();
+                if !predicates::is_anonymous_type(n.as_ref()) {
+                    return None;
+                }
+                c.fields
+            },
+            TypeData::Union(u) if !u.properties.forward_reference() => {
+                let n = u.name.to_string();
+                if !predicates::is_anonymous_type(n.as_ref()) {
+                    return None;
+                }
+                Some(u.fields)
+            },
+            _ => None,
+        }
+    }
+
+    // Resolve the FieldList TypeIndex for the Class/Union behind a
+    // BaseClass record. Try the BaseClass tidx directly first; if it's
+    // a forward-ref, fall back through `class_by_name` to the full
+    // definition by name.
+    fn resolve_base_fields_idx(&self, base_class_tidx: TypeIndex) -> Option<TypeIndex> {
+        // First, try the BaseClass tidx directly.
+        let direct_item = self.finder.find(base_class_tidx).ok()?;
+        let direct = direct_item.parse().ok()?;
+        let (name, direct_fields) = match direct {
+            TypeData::Class(c) => {
+                let fields = if c.properties.forward_reference() { None } else { c.fields };
+                (c.name.to_string().into_owned(), fields)
+            },
+            TypeData::Union(u) => {
+                let fields = if u.properties.forward_reference() { None } else { Some(u.fields) };
+                (u.name.to_string().into_owned(), fields)
+            },
+            _ => return None,
+        };
+        if let Some(fl) = direct_fields {
+            return Some(fl);
+        }
+        // Direct was forward-ref or missing -- fall back to name lookup.
+        let full_idx = *self.class_by_name.get(&name)?;
+        let full_item = self.finder.find(full_idx).ok()?;
+        match full_item.parse().ok()? {
+            TypeData::Class(c) => c.fields,
+            TypeData::Union(u) => Some(u.fields),
+            _ => None,
         }
     }
 
@@ -669,17 +862,17 @@ impl<'a> Lowering<'a> {
                 // unique-by-construction so we don't risk a clash).
                 let underlying = resolve_type(e.underlying_type, self.finder, self.entry.ns_tag)
                     .unwrap_or(TypeRef::Primitive("i32"));
-                let mut raw: Vec<(String, i128)> = Vec::new();
+                let mut raw: Vec<(String, i128, Option<&'static str>)> = Vec::new();
                 if let Ok(field_list) = self.finder.find(e.fields)
                     && let Ok(TypeData::FieldList(fl)) = field_list.parse()
                 {
                     collect_enum_raw(&fl, self.finder, &mut raw);
                 }
-                let names: Vec<&str> = raw.iter().map(|(s, _)| s.as_str()).collect();
+                let names: Vec<&str> = raw.iter().map(|(s, _, _)| s.as_str()).collect();
                 let prefix_len = name::common_variant_prefix_len(&names);
                 let mut variants = Vec::new();
                 let mut used = rustc_hash::FxHashSet::default();
-                for (orig_v, value) in raw {
+                for (orig_v, value, build_tag) in raw {
                     let trimmed = &orig_v[prefix_len..];
                     let mut r = name::to_snake_case(trimmed);
                     if r.is_empty() {
@@ -695,7 +888,12 @@ impl<'a> Lowering<'a> {
                     while !used.insert(r.clone()) {
                         r.push('_');
                     }
-                    variants.push(EnumVariant { original_name: orig_v, rust_name: r, value });
+                    variants.push(EnumVariant {
+                        original_name: orig_v,
+                        rust_name: r,
+                        value,
+                        build_tag,
+                    });
                 }
                 let synthetic_original =
                     format!("{parent_original}::{synthetic_name}").replace("::", "_");
@@ -730,7 +928,7 @@ struct FieldTypeInfo {
 fn collect_enum_raw(
     fl: &FieldList<'_>,
     finder: &ItemFinder<'_, TypeIndex>,
-    out: &mut Vec<(String, i128)>,
+    out: &mut Vec<(String, i128, Option<&'static str>)>,
 ) {
     for field in &fl.fields {
         if let TypeData::Enumerate(ev) = field {
@@ -738,17 +936,21 @@ fn collect_enum_raw(
             if original.is_empty() {
                 continue;
             }
+            // Zero-extend within the enum's underlying width before
+            // widening to i128, preserving PDB bit patterns
+            // (e.g. `0x80000001` in an int32 enum stays `0x80000001`,
+            // not `-0x7fffffff`).
             let value = match ev.value {
-                pdb::Variant::I8(v) => v as i128,
+                pdb::Variant::I8(v) => v as u8 as i128,
                 pdb::Variant::U8(v) => v as i128,
-                pdb::Variant::I16(v) => v as i128,
+                pdb::Variant::I16(v) => v as u16 as i128,
                 pdb::Variant::U16(v) => v as i128,
-                pdb::Variant::I32(v) => v as i128,
+                pdb::Variant::I32(v) => v as u32 as i128,
                 pdb::Variant::U32(v) => v as i128,
-                pdb::Variant::I64(v) => v as i128,
+                pdb::Variant::I64(v) => v as u64 as i128,
                 pdb::Variant::U64(v) => v as i128,
             };
-            out.push((original, value));
+            out.push((original, value, None));
         }
     }
     if let Some(cont) = fl.continuation
@@ -801,7 +1003,9 @@ fn resolve_typedata(
             Some(_) => TypeRef::Ref(Box::new(TypeRef::Primitive(primitive_to_rust(p.kind)))),
             None => TypeRef::Primitive(primitive_to_rust(p.kind)),
         },
-        TypeData::Pointer(p) => resolve_pointer(p.underlying_type, finder, default_ns),
+        TypeData::Pointer(p) => {
+            resolve_pointer(p.underlying_type, finder, default_ns, p.attributes.is_volatile())
+        },
         // Bare LF_PROCEDURE in a value-position (rare -- usually wrapped
         // in an LF_POINTER which `resolve_pointer` handles).  Lower into
         // `FnPtr` so we don't drop the typing info on the floor.
@@ -813,29 +1017,32 @@ fn resolve_typedata(
         // `this` pointer separately) -- keep them untyped.
         TypeData::MemberFunction(_) => TypeRef::Pointer,
         TypeData::Modifier(m) => {
-            resolve_type(m.underlying_type, finder, default_ns).unwrap_or(TypeRef::Opaque(0))
+            let inner =
+                resolve_type(m.underlying_type, finder, default_ns).unwrap_or(TypeRef::Opaque(0));
+            if m.volatile { TypeRef::Volatile(Box::new(inner)) } else { inner }
         },
-        // For classes and unions: check the substitution table BEFORE the
-        // forward-reference guard. Forward-decl `_LIST_ENTRY` / `_UNICODE_STRING`
-        // members should still resolve to their `ntbind::nt::*` wrappers
-        // because the wrapper carries authoritative size info -- the wire
-        // format doesn't care about the PDB-side decl shape.
+        // Class/Union: substitute_native_type wins over the forward-ref
+        // guard so wrappers with authoritative size are kept.
         TypeData::Class(c) => {
             let original = c.name.to_string();
             let original = original.as_ref();
             if let Some(sub) = substitute_native_type(original) {
                 return sub;
             }
-            if c.properties.forward_reference() {
-                return TypeRef::Opaque(0);
-            }
+            // Forward-ref decls still have a full definition emitted
+            // elsewhere in the unit; classify the name so the field
+            // reference targets that header instead of stripping to
+            // Opaque. Fall back to Opaque only for templated/qualified
+            // names with no per-type header.
             if original.contains('<') || original.contains("::") {
                 TypeRef::Opaque(c.size)
             } else {
-                match name::classify(original) {
-                    Some(path) => TypeRef::UserDefined(path),
-                    None => TypeRef::Opaque(c.size),
-                }
+                // Unprefixed names (no classify() match) bucket under
+                // the PDB's own namespace via `fallback_path`, matching
+                // what `lower_class` emits.
+                let path = name::classify(original)
+                    .unwrap_or_else(|| name::fallback_path(default_ns, original));
+                TypeRef::UserDefined(path)
             }
         },
         TypeData::Union(u) => {
@@ -844,16 +1051,13 @@ fn resolve_typedata(
             if let Some(sub) = substitute_native_type(original) {
                 return sub;
             }
-            if u.properties.forward_reference() {
-                return TypeRef::Opaque(0);
-            }
+            // Same forward-ref reasoning as TypeData::Class above.
             if original.contains('<') || original.contains("::") {
                 TypeRef::Opaque(u.size)
             } else {
-                match name::classify(original) {
-                    Some(path) => TypeRef::UserDefined(path),
-                    None => TypeRef::Opaque(u.size),
-                }
+                let path = name::classify(original)
+                    .unwrap_or_else(|| name::fallback_path(default_ns, original));
+                TypeRef::UserDefined(path)
             }
         },
         TypeData::Enumeration(e) if !e.properties.forward_reference() => {
@@ -863,10 +1067,11 @@ fn resolve_typedata(
                 resolve_type(e.underlying_type, finder, default_ns)
                     .unwrap_or(TypeRef::Primitive("i32"))
             } else {
-                match name::classify(original) {
-                    Some(path) => TypeRef::UserDefined(path),
-                    None => TypeRef::Opaque(4),
-                }
+                // Same fallback as Class/Union above; unprefixed enum
+                // names resolve via `fallback_path`.
+                let path = name::classify(original)
+                    .unwrap_or_else(|| name::fallback_path(default_ns, original));
+                TypeRef::UserDefined(path)
             }
         },
         TypeData::Array(a) => {
@@ -974,9 +1179,10 @@ fn primitive_is_signed(kind: PrimitiveKind) -> bool {
 fn primitive_to_rust(kind: PrimitiveKind) -> &'static str {
     match kind {
         PrimitiveKind::Void | PrimitiveKind::NoType => "::core::ffi::c_void",
-        PrimitiveKind::Char | PrimitiveKind::RChar | PrimitiveKind::I8 => "i8",
+        PrimitiveKind::RChar => "char",
+        PrimitiveKind::Char | PrimitiveKind::I8 => "i8",
         PrimitiveKind::UChar | PrimitiveKind::U8 | PrimitiveKind::Bool8 => "u8",
-        PrimitiveKind::WChar | PrimitiveKind::RChar16 => "u16",
+        PrimitiveKind::WChar | PrimitiveKind::RChar16 => "wchar",
         PrimitiveKind::RChar32 => "u32",
         PrimitiveKind::Short | PrimitiveKind::I16 => "i16",
         PrimitiveKind::UShort | PrimitiveKind::U16 | PrimitiveKind::Bool16 => "u16",
@@ -1019,6 +1225,11 @@ fn resolve_pointer(
     idx: TypeIndex,
     finder: &ItemFinder<'_, TypeIndex>,
     default_ns: &str,
+    // CodeView encodes `volatile T*` as either an LF_POINTER with
+    // `isvolatile` set in attributes, or LF_POINTER -> LF_MODIFIER
+    // (volatile) -> T. Caller passes the former via this flag; the
+    // peel loop OR's in the latter.
+    pointer_volatile: bool,
 ) -> TypeRef {
     let Ok(item) = finder.find(idx) else {
         return TypeRef::Pointer;
@@ -1029,9 +1240,16 @@ fn resolve_pointer(
     // Bounded modifier-peel.  In practice ntoskrnl chains never go
     // beyond depth 1; cap at 4 to guard against pathological PDBs
     // without risking an unbounded loop on a corrupted chain.
+    // Track `saw_volatile` so the qualifier survives onto the pointee.
+    // `const` is intentionally dropped: it doesn't affect the wire
+    // format and consumers don't dispatch on it.
+    let mut saw_volatile = pointer_volatile;
     for _ in 0..4 {
         match data {
             TypeData::Modifier(m) => {
+                if m.volatile {
+                    saw_volatile = true;
+                }
                 let Ok(inner) = finder.find(m.underlying_type) else {
                     return TypeRef::Pointer;
                 };
@@ -1052,27 +1270,58 @@ fn resolve_pointer(
     match data {
         TypeData::Class(c) => {
             let original = c.name.to_string();
+            // Native-type substitution wins over PDB-side classification
+            // so `_UNICODE_STRING*` etc. render as their wrappers.
+            if let Some(sub) = substitute_native_type(original.as_ref()) {
+                let inner = if saw_volatile { TypeRef::Volatile(Box::new(sub)) } else { sub };
+                return TypeRef::Ref(Box::new(inner));
+            }
             match classify_or_fallback(original.as_ref()) {
-                Some(path) => TypeRef::TypedPointer { path, kind: crate::ir::PointeeKind::Struct },
+                Some(path) => TypeRef::TypedPointer {
+                    path,
+                    kind: crate::ir::PointeeKind::Struct,
+                    volatile_pointee: saw_volatile,
+                },
                 None => TypeRef::Pointer,
             }
         },
         TypeData::Union(u) => {
             let original = u.name.to_string();
+            if let Some(sub) = substitute_native_type(original.as_ref()) {
+                let inner = if saw_volatile { TypeRef::Volatile(Box::new(sub)) } else { sub };
+                return TypeRef::Ref(Box::new(inner));
+            }
             match classify_or_fallback(original.as_ref()) {
-                Some(path) => TypeRef::TypedPointer { path, kind: crate::ir::PointeeKind::Union },
+                Some(path) => TypeRef::TypedPointer {
+                    path,
+                    kind: crate::ir::PointeeKind::Union,
+                    volatile_pointee: saw_volatile,
+                },
                 None => TypeRef::Pointer,
             }
         },
         TypeData::Enumeration(e) => {
             let original = e.name.to_string();
             match classify_or_fallback(original.as_ref()) {
-                Some(path) => TypeRef::TypedPointer { path, kind: crate::ir::PointeeKind::Enum },
+                Some(path) => TypeRef::TypedPointer {
+                    path,
+                    kind: crate::ir::PointeeKind::Enum,
+                    volatile_pointee: saw_volatile,
+                },
                 None => TypeRef::Pointer,
             }
         },
+        // Pointer-to-function: emit `FnPtr(sig)` directly. Wrapping in
+        // `Ref(FnPtr(...))` would render as a double pointer.
+        TypeData::Procedure(_) => match lower_procedure_data(&data, finder, default_ns) {
+            Some(sig) => TypeRef::FnPtr(Box::new(sig)),
+            None => TypeRef::Pointer,
+        },
         ref other => {
-            let inner = resolve_typedata(other, finder, default_ns);
+            let mut inner = resolve_typedata(other, finder, default_ns);
+            if saw_volatile {
+                inner = TypeRef::Volatile(Box::new(inner));
+            }
             TypeRef::Ref(Box::new(inner))
         },
     }
@@ -1083,8 +1332,8 @@ fn resolve_pointer(
 fn sizeof(r: &TypeRef, _finder: &ItemFinder<'_, TypeIndex>) -> u64 {
     match r {
         TypeRef::Primitive(n) => match *n {
-            "i8" | "u8" => 1,
-            "i16" | "u16" => 2,
+            "i8" | "u8" | "char" => 1,
+            "i16" | "u16" | "wchar" => 2,
             "i32" | "u32" | "f32" => 4,
             "i64" | "u64" | "f64" => 8,
             "i128" | "u128" => 16,
@@ -1095,5 +1344,7 @@ fn sizeof(r: &TypeRef, _finder: &ItemFinder<'_, TypeIndex>) -> u64 {
         TypeRef::Opaque(s) => *s,
         TypeRef::UserDefined(_) => 0,
         TypeRef::External { byte_size, .. } => *byte_size,
+        // `Volatile(T)` is a qualifier-only wrapper: same layout as T.
+        TypeRef::Volatile(inner) => sizeof(inner, _finder),
     }
 }

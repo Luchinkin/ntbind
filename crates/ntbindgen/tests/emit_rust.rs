@@ -45,7 +45,7 @@ fn emit_one_named(ns: MergedNamespace, suffix: &str) -> (PathBuf, String) {
     for n in &nsvec {
         emit::write_unit(n, &tmp, opts, Target::Rust).unwrap();
     }
-    emit::finalize(&tmp, &nsvec, Target::Rust).unwrap();
+    emit::finalize(&tmp, &nsvec, opts, Target::Rust).unwrap();
     let body = read_file(&tmp.join("src/nt/foo_t.rs"));
     (tmp, body)
 }
@@ -130,8 +130,18 @@ fn enum_tryfrom_uses_unknown_discriminant() {
         path: rp("nt", "foo_e_t"),
         underlying: TypeRef::Primitive("i32"),
         variants: vec![
-            EnumVariant { original_name: "FooA".to_owned(), rust_name: "a".to_owned(), value: 0 },
-            EnumVariant { original_name: "FooB".to_owned(), rust_name: "b".to_owned(), value: 1 },
+            EnumVariant {
+                original_name: "FooA".to_owned(),
+                rust_name: "a".to_owned(),
+                value: 0,
+                build_tag: None,
+            },
+            EnumVariant {
+                original_name: "FooB".to_owned(),
+                rust_name: "b".to_owned(),
+                value: 1,
+                build_tag: None,
+            },
         ],
     };
     let ns = ns_with(vec![TypeDecl::Enum(e)]);
@@ -140,7 +150,8 @@ fn enum_tryfrom_uses_unknown_discriminant() {
     std::fs::create_dir_all(&tmp).unwrap();
     emit::write_unit(&ns, &tmp, EmitOptions { publics: false, no_encrypt: false }, Target::Rust)
         .unwrap();
-    emit::finalize(&tmp, &[ns], Target::Rust).unwrap();
+    emit::finalize(&tmp, &[ns], EmitOptions { publics: false, no_encrypt: false }, Target::Rust)
+        .unwrap();
     let body = read_file(&tmp.join("src/nt/foo_e_t.rs"));
 
     assert!(body.contains("impl ::core::convert::TryFrom<i32> for FooET"), "missing TryFrom impl");
@@ -164,7 +175,11 @@ fn orphan_typed_pointer_pointee_gets_stub() {
         8,
         vec![field(
             "Ptr",
-            TypeRef::TypedPointer { path: rp("nt", "ghost_t"), kind: PointeeKind::Struct },
+            TypeRef::TypedPointer {
+                path: rp("nt", "ghost_t"),
+                kind: PointeeKind::Struct,
+                volatile_pointee: false,
+            },
             0,
             64,
         )],
@@ -216,7 +231,8 @@ fn namespace_prelude_re_exports_named_types() {
     std::fs::create_dir_all(&tmp).unwrap();
     emit::write_unit(&ns, &tmp, EmitOptions { publics: false, no_encrypt: false }, Target::Rust)
         .unwrap();
-    emit::finalize(&tmp, &[ns], Target::Rust).unwrap();
+    emit::finalize(&tmp, &[ns], EmitOptions { publics: false, no_encrypt: false }, Target::Rust)
+        .unwrap();
     let mod_rs = read_file(&tmp.join("src/nt/mod.rs"));
 
     assert!(mod_rs.contains("pub mod prelude {"));
@@ -239,7 +255,11 @@ fn typed_public_renders_with_fn_pointer_type() {
     let sig = FnSig {
         return_type: TypeRef::Primitive("i32"),
         params: vec![
-            TypeRef::TypedPointer { path: rp("nt", "kevent_t"), kind: PointeeKind::Struct },
+            TypeRef::TypedPointer {
+                path: rp("nt", "kevent_t"),
+                kind: PointeeKind::Struct,
+                volatile_pointee: false,
+            },
             TypeRef::Primitive("i32"),
             TypeRef::Primitive("u8"),
         ],

@@ -13,15 +13,21 @@ pub struct BuildEntry {
     // True for the build whose layout the generator bakes as the
     // in-source default.  Exactly one entry sets this.
     pub is_canonical: bool,
+    // Human-readable Windows release tag used in per-variant / per-field
+    // comments (e.g. "Windows 10 v20H2").
+    pub friendly: &'static str,
 }
 
 // Build inventory.  Each entry's `path_suffix` is searched under
 // `--symbols`; missing entries are skipped with a warning instead of
 // failing the whole run.  Extend this slice when adding cross-build
 // merging back in.
-//
-pub const BUILDS: &[BuildEntry] =
-    &[BuildEntry { name: "host", path_suffix: "", is_canonical: true }];
+pub const BUILDS: &[BuildEntry] = &[BuildEntry {
+    name: "host",
+    path_suffix: "",
+    is_canonical: true,
+    friendly: "Windows 10 v20H2",
+}];
 
 // One PDB to scrape and its Rust namespace.
 #[derive(Clone, Copy, Debug)]
@@ -76,6 +82,82 @@ pub const PDB_ENTRIES: &[PdbEntry] = &[
 pub const NAMESPACE_PREFIXES: &[(&str, &str)] = &[
     // Multi-character prefixes (longest first so they match before short ones).
     ("event_trace", "etwi"),
+    // "Private" prefixes (suffix `p`, `pf`, etc.) -- inserted first so
+    // they win over their shorter-substring siblings (`iop` before `io`,
+    // `halp` before `hal`, ...). classify() returns on first match.
+    ("dbgkp", "dbgkp"),
+    ("ndisp", "ndisp"),
+    ("iopf", "iopf"),
+    ("iovp", "iovp"),
+    ("ksep", "ksep"),
+    ("hdlsp", "hdlsp"),
+    ("rtlpx", "rtlpx"),
+    ("expi", "expi"),
+    ("etwp", "etwp"),
+    ("halp", "halp"),
+    ("hali", "hali"),
+    ("hvlp", "hvlp"),
+    ("hvi", "hvi"),
+    ("hvp", "hvp"),
+    ("ldrp", "ldrp"),
+    ("lpcp", "lpcp"),
+    ("rtlp", "rtlp"),
+    ("rtlx", "rtlx"),
+    ("wmip", "wmip"),
+    ("popp", "popp"),
+    ("sdbp", "sdbp"),
+    ("verfp", "verfp"),
+    ("hidp", "hidp"),
+    ("alpcp", "alpcp"),
+    ("alpci", "alpci"),
+    ("bapdp", "bapdp"),
+    ("arbp", "arbp"),
+    ("bgkp", "bgkp"),
+    ("bipd", "bipd"),
+    ("aslp", "aslp"),
+    ("ahci", "ahci"),
+    ("csrp", "csrp"),
+    ("dmrp", "dmrp"),
+    ("drvp", "drvp"),
+    ("dbgp", "dbgp"),
+    ("emp", "emp"),
+    ("gxp", "gxp"),
+    // Special-case: `exp` maps directly to `expi` so `_EXP_FOO` lands in
+    // `expi::foo_t` rather than `ex::p::foo_t`.
+    ("exp", "expi"),
+    ("iov", "iov"),
+    ("iop", "iop"),
+    ("obp", "obp"),
+    ("cmp", "cmp"),
+    ("cip", "cip"),
+    ("civ", "civ"),
+    ("psp", "psp"),
+    ("pcix", "pcix"),
+    ("pip", "pip"),
+    ("pix", "pix"),
+    ("pii", "pii"),
+    ("pfp", "pfp"),
+    ("pfx", "pfx"),
+    ("pox", "pox"),
+    ("ppp", "ppp"),
+    ("ppv", "ppv"),
+    ("kev", "kev"),
+    ("kdp", "kdp"),
+    ("sep", "sep"),
+    ("smp", "smp"),
+    ("spi", "spi"),
+    ("sshp", "sshp"),
+    ("tpp", "tpp"),
+    ("ttmi", "ttmi"),
+    ("ttmp", "ttmp"),
+    ("txtp", "txtp"),
+    ("wdip", "wdip"),
+    ("wheap", "wheap"),
+    ("xhalp", "xhalp"),
+    ("bip", "bip"),
+    ("kz", "kz"),
+    ("kx", "kx"),
+    ("xm", "xm"),
     ("dxgkargcb", "dxgk::arg::cb"),
     ("dxgkarg", "dxgk::arg"),
     ("dxgiddicb", "dxgi::ddi::cb"),

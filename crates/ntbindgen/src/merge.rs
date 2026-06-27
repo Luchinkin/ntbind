@@ -55,6 +55,32 @@ pub fn merge_builds(loaded: Vec<LoadedBuild>) -> Vec<MergedNamespace> {
     out
 }
 
+// PDBs from different `ns_tag` buckets can emit the same classified
+// type. Drop duplicates by `(path.ns, path.name)`, preferring the
+// earlier `PDB_ENTRIES` position.
+pub fn dedup_across_namespaces(
+    mut namespaces: Vec<MergedNamespace>,
+    pdb_entries: &[crate::config::PdbEntry],
+) -> Vec<MergedNamespace> {
+    let ns_rank = |ns_tag: &str| -> usize {
+        pdb_entries.iter().position(|e| e.ns_tag == ns_tag).unwrap_or(usize::MAX)
+    };
+    namespaces.sort_by_key(|n| ns_rank(n.default_ns));
+
+    let mut seen: rustc_hash::FxHashSet<(String, String)> = rustc_hash::FxHashSet::default();
+    for ns in &mut namespaces {
+        ns.types.retain(|t| {
+            let path = match t {
+                TypeDecl::Struct(s) | TypeDecl::Union(s) => &s.path,
+                TypeDecl::Enum(e) => &e.path,
+                TypeDecl::Stub(s) => &s.path,
+            };
+            seen.insert((path.ns.clone(), path.name.clone()))
+        });
+    }
+    namespaces
+}
+
 // In-flight namespace aggregator. Owns per-(original_name) buckets keyed by
 // `BuildEntry::name`. Builds are visited in input order, so canonicality is
 // resolved by `is_canonical` rather than ordering.
@@ -195,9 +221,7 @@ fn pick_canonical_public(
         .or_else(|| per_build.values().next().copied())?;
     // Signature can come from any build that recovered one.  If the
     // chosen build has `None`, scan the rest in `seen_builds` order
-    // (canonical first) and take the first `Some`.  Selene's writer
-    // (`writer.cpp:1118-1133`) walks every build's `type_names`; we
-    // shortcut to the first non-None since today we still emit one
+    // (canonical first) and take the first `Some` -- today we emit one
     // signature per public, not a union of variants.
     let signature = if p.signature.is_some() {
         p.signature.clone()
@@ -265,6 +289,7 @@ fn clone_enum(e: &EnumDecl) -> EnumDecl {
                 original_name: v.original_name.clone(),
                 rust_name: v.rust_name.clone(),
                 value: v.value,
+                build_tag: v.build_tag,
             })
             .collect(),
     }
@@ -277,7 +302,7 @@ mod tests {
     use crate::name::RustPath;
 
     fn build(name: &'static str, is_canonical: bool) -> BuildEntry {
-        BuildEntry { name, path_suffix: "", is_canonical }
+        BuildEntry { name, path_suffix: "", is_canonical, friendly: name }
     }
 
     fn mk_field(orig: &str, bit_off: u32) -> FieldDecl {
