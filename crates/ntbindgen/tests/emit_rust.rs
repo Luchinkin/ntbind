@@ -56,7 +56,14 @@ fn read_file(p: &Path) -> String {
 fn make_struct(name: &str, size: u64, fields: Vec<FieldDecl>) -> StructDecl {
     let original_name = format!("_{}", name.to_ascii_uppercase());
     let summary_key = ntbindgen::name::sdbm_hash(&format!("{original_name}.$"));
-    StructDecl { original_name, path: rp("nt", &format!("{name}_t")), size, fields, summary_key }
+    StructDecl {
+        original_name,
+        path: rp("nt", &format!("{name}_t")),
+        owner_image: "ntoskrnl.exe",
+        size,
+        fields,
+        summary_key,
+    }
 }
 
 #[test]
@@ -248,6 +255,7 @@ fn typed_public_renders_with_fn_pointer_type() {
     let kevent = StructDecl {
         original_name: "_KEVENT".to_owned(),
         path: rp("nt", "kevent_t"),
+        owner_image: "ntoskrnl.exe",
         size: 24,
         fields: vec![],
         summary_key: 0,

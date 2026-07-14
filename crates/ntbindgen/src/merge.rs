@@ -257,6 +257,7 @@ fn clone_struct(s: &StructDecl) -> StructDecl {
     StructDecl {
         original_name: s.original_name.clone(),
         path: s.path.clone(),
+        owner_image: s.owner_image,
         size: s.size,
         fields: s.fields.iter().map(clone_field).collect(),
         summary_key: s.summary_key,
@@ -327,6 +328,7 @@ mod tests {
                 ns: "nt".to_owned(),
                 name: format!("{}_t", name.trim_start_matches('_').to_ascii_lowercase()),
             },
+            owner_image: "ntoskrnl.exe",
             size: 0x20,
             fields,
             summary_key,

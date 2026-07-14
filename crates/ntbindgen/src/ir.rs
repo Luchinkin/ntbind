@@ -51,6 +51,10 @@ pub struct StructDecl {
     pub original_name: String,
     // Where the type lives in the generated tree.
     pub path: RustPath,
+    // PDB image that owns this type's layout and field offsets.
+    // This must remain attached to the type even when several PDBs share
+    // one generated namespace (for example ntkrnlmp.pdb and hal.pdb).
+    pub owner_image: &'static str,
     // Byte size from the PDB.
     pub size: u64,
     pub fields: Vec<FieldDecl>,

@@ -204,5 +204,7 @@ fn emit_for(
             .with_context(|| format!("emitting {} ({:?})", ns.default_ns, target))?;
     }
     emit::finalize(root, namespaces, opts, *target).context("finalizing target tree")?;
+    emit::write_offset_owner_manifest(root, namespaces)
+        .context("writing offset-owner-manifest.json")?;
     Ok(())
 }

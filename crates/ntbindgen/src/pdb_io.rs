@@ -373,6 +373,7 @@ impl<'a> Lowering<'a> {
         let decl = StructDecl {
             original_name: original.to_owned(),
             path,
+            owner_image: self.entry.hint_image,
             size: c.size,
             fields,
             summary_key,
@@ -405,6 +406,7 @@ impl<'a> Lowering<'a> {
         Some(TypeDecl::Union(StructDecl {
             original_name: original.to_owned(),
             path,
+            owner_image: self.entry.hint_image,
             size: u.size,
             fields,
             summary_key,
@@ -805,6 +807,7 @@ impl<'a> Lowering<'a> {
                 let decl = StructDecl {
                     original_name: synthetic_original,
                     path: synthetic_path.clone(),
+                    owner_image: self.entry.hint_image,
                     size: c.size,
                     fields,
                     summary_key,
@@ -837,6 +840,7 @@ impl<'a> Lowering<'a> {
                 let decl = StructDecl {
                     original_name: synthetic_original,
                     path: synthetic_path.clone(),
+                    owner_image: self.entry.hint_image,
                     size: u.size,
                     fields,
                     summary_key,
