@@ -74,6 +74,7 @@ pub const PDB_ENTRIES: &[PdbEntry] = &[
     PdbEntry { ns_tag: "dxgi", path: "dxgi.pdb", hint_image: "dxgi.dll" },
     PdbEntry { ns_tag: "ntdll", path: "ntdll.pdb", hint_image: "ntdll.dll" },
     PdbEntry { ns_tag: "wdf", path: "Wdf01000.pdb", hint_image: "Wdf01000.sys" },
+    PdbEntry { ns_tag: "wdfilter", path: "WdFilter.pdb", hint_image: "WdFilter.sys" },
     PdbEntry { ns_tag: "win", path: "combase.pdb", hint_image: "combase.dll" },
 ];
 
